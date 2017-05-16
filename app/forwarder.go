@@ -10,16 +10,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/websocket"
+	"strconv"
 )
 
 const (
 	maxConnectionToHost = 128
 )
 
+type errTimeout interface {
+	Timeout() bool
+}
+
 // HttpForwarder for every incoming connection
 type HttpForwarder struct {
-	dstUrl                       string
+	srcUrl, dstUrl               string
 	allowedHeaders               []string
 	timeout, maxParallelRequests int
 	customHeaders                map[string]string
@@ -27,6 +33,10 @@ type HttpForwarder struct {
 	transport                    *http.Transport
 
 	logger
+
+	statBackendRequests  *prometheus.CounterVec
+	statBackendDurations *prometheus.SummaryVec
+	statActiveConns      *prometheus.GaugeVec
 }
 
 // NewHttpForwarder returns new single instance HttpForwarder for connection.
@@ -45,6 +55,12 @@ func NewHttpForwarder(dstUrl string, allowedHeaders []string, timeout, maxParall
 			},
 		},
 	}
+}
+
+func (hf *HttpForwarder) SetStats(requests *prometheus.CounterVec, durations *prometheus.SummaryVec, conns *prometheus.GaugeVec) {
+	hf.statBackendRequests = requests
+	hf.statBackendDurations = durations
+	hf.statActiveConns = conns
 }
 
 // isAllowedHeader is a function that checks existence of header in allowedHeaders
@@ -67,6 +83,13 @@ func (hf *HttpForwarder) addCustomHeader(header, value string) {
 
 // Handler is a handler function for handling connection from WS.
 func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
+	// count active conns
+	hf.srcUrl = ws.Request().URL.Path
+	if hf.statActiveConns != nil {
+		hf.statActiveConns.WithLabelValues(hf.srcUrl).Inc()
+		defer hf.statActiveConns.WithLabelValues(hf.srcUrl).Dec()
+	}
+
 	var (
 		err                error
 		msg                []byte
@@ -101,8 +124,13 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 			var resp []byte
 			now := time.Now()
 			rc, err, rpcErr := hf.doHttpRequest(client, msg)
+			duration := time.Since(now)
 			<-maxParallelRequest
 
+			// save stat
+			hf.statRequest(methodFromRequest(msg), duration, err, rpcErr)
+
+			// process response
 			if rpcErr != nil {
 				// go
 			} else if err != nil {
@@ -120,7 +148,7 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 				hf.Errorf("rpc err=%v", rpcErr)
 			}
 
-			hf.Tracef("type=response ip=%s duration=%s data=%s", ws.Request().RemoteAddr, time.Since(now), resp)
+			hf.Tracef("type=response ip=%s duration=%s data=%s", ws.Request().RemoteAddr, duration, resp)
 			if err = websocket.Message.Send(ws, string(resp)); err != nil {
 				hf.Errorf("can't send data to client=%s err=%s", ws.RemoteAddr().String(), err)
 			}
@@ -128,6 +156,27 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 			return
 		}(msg)
 	}
+}
+
+// statRequest logs requests durations.
+func (hf *HttpForwarder) statRequest(method string, duration time.Duration, err error, rpcErr *JsonRpcErrResponse) {
+	if hf.statBackendDurations == nil && hf.statBackendRequests == nil {
+		return
+	}
+
+	status, httpCode := "ok", "200"
+	if rpcErr != nil {
+		status, httpCode = "error", strconv.Itoa(rpcErr.Error.Code)
+	}
+
+	if err != nil {
+		if t, ok := err.(errTimeout); ok && t.Timeout() {
+			status = "timeout"
+		}
+	}
+
+	hf.statBackendRequests.WithLabelValues(hf.srcUrl, method, status).Inc()
+	hf.statBackendDurations.WithLabelValues(hf.srcUrl, method, httpCode).Observe(duration.Seconds())
 }
 
 // doHttpRequest sends http request to json-rpc 2.0 endpoint.

@@ -12,6 +12,8 @@ import (
 
 var Version string
 
+const AppName = "ws2http"
+
 var (
 	flHost        = flag.String("h", "localhost:8090", "websocket listen address")
 	flHeaders     = flag.String("headers", "Authorization", "allow set custom http headers to rpc backend via comma")
@@ -42,6 +44,7 @@ func main() {
 	}
 
 	a := &app.App{
+		AppName:             AppName,
 		ListenAddr:          *flHost,
 		RedirectRules:       rules,
 		Headers:             strings.Split(*flHeaders, ","),
@@ -51,7 +54,7 @@ func main() {
 
 	a.SetStdLoggers()
 	a.SetLogLevel(logLevel(*flVerbose, *flTrace))
-	a.Printf("starting ws2http version=%s", Version)
+	a.Printf("starting %s version=%s", AppName, Version)
 	if err := a.Run(); err != nil {
 		log.SetOutput(os.Stderr)
 		log.Fatal(err.Error())

@@ -8,7 +8,8 @@ import (
 const JsonRpcServerErr = -32000
 
 type JsonRpcRequest struct {
-	Id interface{} `json:"id"`
+	Id     interface{} `json:"id"`
+	Method string      `json:"method"`
 }
 
 type JsonRpcErrResponse struct {
@@ -18,6 +19,18 @@ type JsonRpcErrResponse struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// methodFromRequest returns method from JSON RPC request. It returns '-' if method is empty.
+func methodFromRequest(msg []byte) string {
+	var req JsonRpcRequest
+	json.Unmarshal(msg, &req) // we ignoring unmarshal errors
+
+	if req.Method == "" {
+		return "-"
+	}
+
+	return req.Method
 }
 
 // NewJsonRpcErrResponse returns new JsonRPC err object with correct ID from postData.
@@ -35,6 +48,7 @@ func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *Js
 		Version: "2.0",
 	}
 
+	// TODO(sergeyfast) err could disclose internal dest rpc urls.
 	if err != nil {
 		rpcErr.Error.Message = err.Error()
 	}
