@@ -38,6 +38,8 @@ Features
  * Trace logs (requests/responses)
  * Encapsulated http backend errors to JSON-RPC errors.
  * Supports multiple endpoints
+ * Supports /metrics endpoint as Prometheus handler
+
 
 How to run
 ------
