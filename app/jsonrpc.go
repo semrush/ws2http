@@ -2,13 +2,14 @@ package app
 
 import (
 	"encoding/json"
-	"github.com/semrush/ws2http/warn"
+	"log"
 )
 
 const JsonRpcServerErr = -32000
 
 type JsonRpcRequest struct {
-	Id interface{} `json:"id"`
+	Id     interface{} `json:"id"`
+	Method string      `json:"method"`
 }
 
 type JsonRpcErrResponse struct {
@@ -20,13 +21,25 @@ type JsonRpcErrResponse struct {
 	} `json:"error"`
 }
 
+// methodFromRequest returns method from JSON RPC request. It returns '-' if method is empty.
+func methodFromRequest(msg []byte) string {
+	var req JsonRpcRequest
+	json.Unmarshal(msg, &req) // we ignoring unmarshal errors
+
+	if req.Method == "" {
+		return "-"
+	}
+
+	return req.Method
+}
+
 // NewJsonRpcErrResponse returns new JsonRPC err object with correct ID from postData.
 // If httpCode is set then it will be multiply by -1.
 func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *JsonRpcErrResponse) {
 	// parse json rpc request
 	var req JsonRpcRequest
 	if mErr := json.Unmarshal(postData, &req); mErr != nil {
-		warn.Printf("requested message isn't in JsonRpcRequest format: err=%s", mErr)
+		log.Printf("requested message isn't in JsonRpcRequest format: err=%s", mErr)
 		return
 	}
 
@@ -35,6 +48,7 @@ func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *Js
 		Version: "2.0",
 	}
 
+	// TODO(sergeyfast) err could disclose internal dest rpc urls.
 	if err != nil {
 		rpcErr.Error.Message = err.Error()
 	}
@@ -52,7 +66,7 @@ func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *Js
 func (r *JsonRpcErrResponse) ToJSON() []byte {
 	resp, err := json.Marshal(r)
 	if err != nil {
-		warn.Println(err)
+		log.Println(err)
 	}
 
 	return resp
