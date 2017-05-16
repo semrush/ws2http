@@ -2,17 +2,15 @@ package app
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/tls"
-	"github.com/semrush/ws2http/warn"
-	"github.com/semrush/ws2http/warn/trace"
-	"golang.org/x/net/websocket"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
 const (
@@ -27,6 +25,8 @@ type HttpForwarder struct {
 	customHeaders                map[string]string
 	lockH                        sync.RWMutex // guards customHeaders
 	transport                    *http.Transport
+
+	logger
 }
 
 // NewHttpForwarder returns new single instance HttpForwarder for connection.
@@ -77,12 +77,12 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 	for {
 		if err = websocket.Message.Receive(ws, &msg); err != nil {
 			if err != io.EOF {
-				warn.Printf("error while receiving data from client=%s err=%s data=%s", ws.Request().RemoteAddr, err, msg)
+				hf.Errorf("error while receiving data from client=%s err=%s data=%s", ws.Request().RemoteAddr, err, msg)
 			}
 			break
 		}
 
-		trace.Printf("type=reqeust ip=%s data=%s custom_header=%+v", ws.Request().RemoteAddr, msg, hf.customHeaders)
+		hf.Tracef("type=request ip=%s data=%s custom_header=%+v", ws.Request().RemoteAddr, msg, hf.customHeaders)
 
 		// set custom headers for session
 		if bytes.HasPrefix(msg, []byte("SET ")) {
@@ -90,7 +90,7 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 			if hf.isAllowedHeader(hv[0]) {
 				hf.addCustomHeader(hv[0], hv[1])
 			} else {
-				trace.Printf("failed to add custom header=%v value=%v ip=%s", hv[0], hv[1], ws.Request().RemoteAddr)
+				hf.Printf("failed to add custom header=%v value=%v ip=%s", hv[0], hv[1], ws.Request().RemoteAddr)
 			}
 
 			continue
@@ -107,22 +107,22 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 				// go
 			} else if err != nil {
 				if err != io.EOF {
-					warn.Print(err)
+					hf.Errorf("not eof err=%v", err)
 				}
 				return
 			} else if resp, err = ioutil.ReadAll(rc); err != nil {
-				warn.Println(err)
+				hf.Errorf("read err=%v", err)
 				rpcErr = NewJsonRpcErrResponse(msg, -200, err)
 			}
 
 			if rpcErr != nil {
 				resp = rpcErr.ToJSON()
-				warn.Println(rpcErr)
+				hf.Errorf("rpc err=%v", rpcErr)
 			}
 
-			trace.Printf("type=response ip=%s duration=%s data=%s", ws.Request().RemoteAddr, time.Since(now), resp)
+			hf.Tracef("type=response ip=%s duration=%s data=%s", ws.Request().RemoteAddr, time.Since(now), resp)
 			if err = websocket.Message.Send(ws, string(resp)); err != nil {
-				warn.Printf("can't send data to client=%s err=%s", ws.RemoteAddr().String(), err)
+				hf.Errorf("can't send data to client=%s err=%s", ws.RemoteAddr().String(), err)
 			}
 
 			return
@@ -144,11 +144,10 @@ func (hf *HttpForwarder) doHttpRequest(client *http.Client, postData []byte) (rc
 	}()
 
 	if err != nil {
-		warn.Println(err)
+		hf.Errorf("http new request err=%s", err)
 		return
 	}
 
-	req.Header.Add("Accept-Encoding", "gzip")
 	if len(hf.customHeaders) > 0 {
 		hf.lockH.RLock()
 		for h, v := range hf.customHeaders {
@@ -159,22 +158,12 @@ func (hf *HttpForwarder) doHttpRequest(client *http.Client, postData []byte) (rc
 
 	resp, err := client.Do(req)
 	if err != nil {
-		warn.Printf("client.Do() request failed url=%s err=%s data=%s", hf.dstUrl, err, postData)
+		hf.Errorf("client.Do() request failed url=%s err=%s data=%s", hf.dstUrl, err, postData)
 		return
 	}
 
 	httpCode = resp.StatusCode
-	// Check that the server actual sent compressed data
-
-	switch resp.Header.Get("Content-Encoding") {
-	case "gzip":
-		rc, err = gzip.NewReader(resp.Body)
-		if err != nil {
-			return
-		}
-	default:
-		rc = resp.Body
-	}
+	rc = resp.Body
 
 	return
 }

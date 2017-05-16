@@ -2,7 +2,7 @@ package app
 
 import (
 	"encoding/json"
-	"github.com/semrush/ws2http/warn"
+	"log"
 )
 
 const JsonRpcServerErr = -32000
@@ -26,7 +26,7 @@ func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *Js
 	// parse json rpc request
 	var req JsonRpcRequest
 	if mErr := json.Unmarshal(postData, &req); mErr != nil {
-		warn.Printf("requested message isn't in JsonRpcRequest format: err=%s", mErr)
+		log.Printf("requested message isn't in JsonRpcRequest format: err=%s", mErr)
 		return
 	}
 
@@ -52,7 +52,7 @@ func NewJsonRpcErrResponse(postData []byte, httpCode int, err error) (rpcErr *Js
 func (r *JsonRpcErrResponse) ToJSON() []byte {
 	resp, err := json.Marshal(r)
 	if err != nil {
-		warn.Println(err)
+		log.Println(err)
 	}
 
 	return resp

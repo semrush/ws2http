@@ -2,9 +2,9 @@ package app
 
 import (
 	"errors"
-	"golang.org/x/net/websocket"
-	"log"
 	"net/http"
+
+	"golang.org/x/net/websocket"
 )
 
 type ProxyRule struct {
@@ -16,16 +16,26 @@ type App struct {
 	RedirectRules                []ProxyRule
 	Headers                      []string
 	Timeout, MaxParallelRequests int
+
+	logger
 }
 
+var ErrNoEndpoints = errors.New("no endpoints were defined")
+
+// Run runs web server with specified redirect rules.
 func (a *App) Run() error {
 	if len(a.RedirectRules) == 0 {
-		return errors.New("no endpoints were defined")
+		return ErrNoEndpoints
 	}
 
 	for _, r := range a.RedirectRules {
-		log.Printf("adding rule from=ws://%s%s to=%s, allowed_headers=%s timeout=%ds parallel_requests=%d", a.ListenAddr, r.Src, r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
-		http.Handle(r.Src, websocket.Handler(NewHttpForwarder(r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests).Handler))
+		a.Printf("adding rule from=ws://%s%s to=%s, allowed_headers=%s timeout=%ds parallel_requests=%d", a.ListenAddr, r.Src, r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
+
+		hf := NewHttpForwarder(r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
+		hf.SetLoggers(a.warn, a.log, a.trace)
+		hf.SetLogLevel(a.logLevel)
+
+		http.Handle(r.Src, websocket.Handler(hf.Handler))
 	}
 
 	return http.ListenAndServe(a.ListenAddr, nil)

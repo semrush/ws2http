@@ -4,8 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"github.com/semrush/ws2http/app"
-	"github.com/semrush/ws2http/warn"
+	"io/ioutil"
 	"log"
+	"os"
 	"strings"
 )
 
@@ -19,28 +20,63 @@ var (
 	flVerbose     = flag.Bool("verbose", false, "enable debug output")
 	flTrace       = flag.Bool("trace", false, "enable trace output")
 	flRoutes      StringFlags
+
+	flDst = flag.String("dst", "", "deprecated, use 'route' flag instead")     // deprecated, old syntax support
+	flSrc = flag.String("src", "/rpc", "deprecated, use 'route' flag instead") // deprecated, old syntax support
 )
 
 func main() {
 	flag.Var(&flRoutes, "route", "mapping from websocket endpoint to http endpoint, like /rpc:http://localhost/rpc")
 	flag.Parse()
-	warn.Init(*flVerbose, *flTrace)
-	if len(flRoutes.ProxyRules()) == 0 {
+	fixStdLog(*flVerbose, *flTrace)
+
+	if len(flRoutes.ProxyRules()) == 0 && (*flSrc == "" && *flDst == "") {
 		flag.PrintDefaults()
 		return
 	}
 
-	log.Printf("starting ws2http version=%s", Version)
-	app := &app.App{
+	// support old syntax rules for -dst -src
+	rules := flRoutes.ProxyRules()
+	if *flSrc != "" && *flDst != "" {
+		rules = append(rules, app.ProxyRule{Src: *flSrc, DstUrl: *flDst})
+	}
+
+	a := &app.App{
 		ListenAddr:          *flHost,
-		RedirectRules:       flRoutes.ProxyRules(),
+		RedirectRules:       rules,
 		Headers:             strings.Split(*flHeaders, ","),
 		Timeout:             *flTimeout,
 		MaxParallelRequests: *flMaxParallel,
 	}
 
-	if err := app.Run(); err != nil {
-		warn.Fatal(err.Error())
+	a.SetStdLoggers()
+	a.SetLogLevel(logLevel(*flVerbose, *flTrace))
+	a.Printf("starting ws2http version=%s", Version)
+	if err := a.Run(); err != nil {
+		log.SetOutput(os.Stderr)
+		log.Fatal(err.Error())
+	}
+}
+
+func logLevel(verbose, trace bool) app.LogLevel {
+	if trace {
+		return app.LogTrace
+	} else if verbose {
+		return app.LogVerbose
+	}
+
+	return app.LogError
+}
+
+// fixStdLog sets additional params to std logger (prefix D, filename & line).
+func fixStdLog(verbose, trace bool) {
+	log.SetPrefix("D")
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	if verbose || trace {
+		log.SetOutput(os.Stdout)
+	} else {
+		log.SetOutput(ioutil.Discard)
 	}
 }
 
@@ -63,7 +99,7 @@ func (f StringFlags) ProxyRules() []app.ProxyRule {
 	pv := []app.ProxyRule{}
 	for _, v := range f.v {
 		routes := strings.SplitN(v, ":", 2)
-		pv = append(pv, app.ProxyRule{routes[0], routes[1]})
+		pv = append(pv, app.ProxyRule{Src: routes[0], DstUrl: routes[1]})
 	}
 
 	return pv

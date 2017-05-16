@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 PATH := bin:$(PATH)
 
-PKG := github.com/semrush/ws2http/app github.com/semrush/ws2http/warn github.com/semrush/ws2http/warn/trace
+PKG := `go list ./... | grep -v /vendor/`
 MAIN := ws2http.go
 
 ifeq ($(RACE),1)
@@ -14,11 +14,10 @@ LDFLAGS=-ldflags "-X=main.Version=$(VERSION)"
 all: fix build
 
 fix:
-	@go get -fix $(PKG)
+	@go get $(PKG)
 
 fmt:
 	@go fmt $(PKG)
-	@go fmt $(MAIN)
 
 vet:
 	@go vet $(PKG)
