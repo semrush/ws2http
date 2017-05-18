@@ -3,6 +3,7 @@ package app
 import (
 	"golang.org/x/net/websocket"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 )
@@ -19,24 +20,33 @@ const (
 )
 
 type (
-	clientConns map[string]*http.Request
+	clientConns  map[string]*http.Request
+	watcherConns map[string]map[string]traceRequest // target -> watchers -> watcher chan
 
 	debugMessage struct {
 		msgType debugMessageType
 		req     *http.Request
 		data    []byte
-		//addr    string //?
 	}
 
 	debugApp struct {
-		events chan debugMessage
-		tasks  chan func(clientConns)
+		events        chan debugMessage
+		tasks         chan func(clientConns)
+		traceRequests chan traceRequest
+	}
+
+	traceRequest struct {
+		Addr       string
+		TargetAddr string
+		Msg        chan debugMessage
+		Cancel     bool
 	}
 )
 
 var debug = debugApp{
-	events: make(chan debugMessage, eventsBuffer),
-	tasks:  make(chan func(clientConns), eventsBuffer),
+	events:        make(chan debugMessage, eventsBuffer),
+	tasks:         make(chan func(clientConns), eventsBuffer),
+	traceRequests: make(chan traceRequest, eventsBuffer),
 }
 
 func init() {
@@ -46,22 +56,40 @@ func init() {
 	go debug.run()
 }
 
-func (debugApp) run() {
-	conns := make(clientConns)
+func (d debugApp) run() {
+	sessions, watchers := make(clientConns), make(watcherConns)
 
 	for {
 		select {
-		case e := <-debug.events:
+		case e := <-d.events:
 			switch e.msgType {
 			case clientConnected:
-				conns[e.req.RemoteAddr] = e.req
+				sessions[e.req.RemoteAddr] = e.req
 			case clientDisconnected:
-				delete(conns, e.req.RemoteAddr)
-			case wsRequest:
-			case httpResponse:
+				delete(sessions, e.req.RemoteAddr)
+
+				// close watchers
+				for _, l := range watchers[e.req.RemoteAddr] {
+					close(l.Msg)
+				}
+				delete(watchers, e.req.RemoteAddr)
+			case wsRequest, httpResponse:
+				for _, watcher := range watchers[e.req.RemoteAddr] {
+					watcher.Msg <- e
+				}
 			}
-		case f := <-debug.tasks:
-			f(conns)
+		case tr := <-d.traceRequests:
+			if tr.Cancel {
+				delete(watchers[tr.TargetAddr], tr.Addr)
+			} else {
+				if _, ok := watchers[tr.TargetAddr]; !ok {
+					watchers[tr.TargetAddr] = make(map[string]traceRequest)
+				}
+
+				watchers[tr.TargetAddr][tr.Addr] = tr
+			}
+		case f := <-d.tasks:
+			f(sessions)
 		}
 	}
 }
@@ -116,6 +144,7 @@ func (d debugApp) trace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var data struct {
+		Server    string
 		Addr      string
 		Connected bool
 	}
@@ -136,21 +165,39 @@ var traceTmpl = template.Must(template.New("trace").Parse(`<html><head>
 <strong>Addr: {{.Addr}}</strong>
 {{if .Connected}}
 <script>
-	var w = new WebSocket("ws://localhost:8090/rpc"); w.onmessage = function(data) { console.log(data); };
-	function (data) {
-		console.log(data);
-	}
+	var w = new WebSocket("ws://" + document.location.host + "/debug/conns/ws?addr={{.Addr}}"); w.onmessage = function(data) {
+	    var tr = document.createElement("tr");
+	    tr.innerHTML = "<td>" + data.timeStamp + "</td>";
+	    var td = document.createElement("td");
+	    td.innerText = data.data;
+	    tr.appendChild(td);
+
+		document.getElementById("output").appendChild(tr);
+	};
 </script>
 
-<p id="data">
-
-</p>
+<table><tbody id="output"></tbody></table>
 {{else}}
 client disconnected
 {{end}}
 <br></body></html>
 `))
 
-func (debugApp) wsHandler(ws *websocket.Conn) {
+func (d debugApp) wsHandler(ws *websocket.Conn) {
+	addr := ws.Request().FormValue("addr")
+	info := make(chan debugMessage, eventsBuffer)
 
+	// register & deregister user
+	d.traceRequests <- traceRequest{Addr: ws.Request().RemoteAddr, TargetAddr: addr, Msg: info}
+	defer func() { d.traceRequests <- traceRequest{Addr: ws.Request().RemoteAddr, TargetAddr: addr, Cancel: true} }()
+
+	for m := range info {
+		if err := websocket.Message.Send(ws, string(m.data)); err != nil {
+			if err != io.EOF {
+				log.Println(err)
+			}
+
+			return
+		}
+	}
 }
