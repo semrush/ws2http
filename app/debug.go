@@ -20,8 +20,8 @@ const (
 )
 
 type (
-	clientConns  map[string]*http.Request
-	watcherConns map[string]map[string]traceRequest // target -> watchers -> watcher chan
+	clientConns map[string]*http.Request
+	traceConns  map[string]map[string]traceRequest // target -> tracers -> trace chan
 
 	debugMessage struct {
 		msgType debugMessageType
@@ -31,7 +31,7 @@ type (
 
 	debugApp struct {
 		events        chan debugMessage
-		tasks         chan func(clientConns)
+		ops           chan func(clientConns)
 		traceRequests chan traceRequest
 	}
 
@@ -45,7 +45,7 @@ type (
 
 var debug = debugApp{
 	events:        make(chan debugMessage, eventsBuffer),
-	tasks:         make(chan func(clientConns), eventsBuffer),
+	ops:           make(chan func(clientConns), eventsBuffer),
 	traceRequests: make(chan traceRequest, eventsBuffer),
 }
 
@@ -53,11 +53,11 @@ func init() {
 	http.HandleFunc("/debug/conns/", debug.index)
 	http.HandleFunc("/debug/conns/trace", debug.trace)
 	http.Handle("/debug/conns/ws", websocket.Handler(debug.wsHandler))
-	go debug.run()
+	go debug.loop()
 }
 
-func (d debugApp) run() {
-	sessions, watchers := make(clientConns), make(watcherConns)
+func (d debugApp) loop() {
+	sessions, tracers := make(clientConns), make(traceConns)
 
 	for {
 		select {
@@ -68,55 +68,57 @@ func (d debugApp) run() {
 			case clientDisconnected:
 				delete(sessions, e.req.RemoteAddr)
 
-				// close watchers
-				for _, l := range watchers[e.req.RemoteAddr] {
+				// close tracers
+				for _, l := range tracers[e.req.RemoteAddr] {
 					close(l.Msg)
 				}
-				delete(watchers, e.req.RemoteAddr)
+				delete(tracers, e.req.RemoteAddr)
 			case wsRequest, httpResponse:
-				for _, watcher := range watchers[e.req.RemoteAddr] {
-					watcher.Msg <- e
+				for _, tracer := range tracers[e.req.RemoteAddr] {
+					tracer.Msg <- e
 				}
 			}
 		case tr := <-d.traceRequests:
 			if tr.Cancel {
-				delete(watchers[tr.TargetAddr], tr.Addr)
+				delete(tracers[tr.TargetAddr], tr.Addr)
 			} else {
-				if _, ok := watchers[tr.TargetAddr]; !ok {
-					watchers[tr.TargetAddr] = make(map[string]traceRequest)
+				if _, ok := tracers[tr.TargetAddr]; !ok {
+					tracers[tr.TargetAddr] = make(map[string]traceRequest)
 				}
 
-				watchers[tr.TargetAddr][tr.Addr] = tr
+				tracers[tr.TargetAddr][tr.Addr] = tr
 			}
-		case f := <-d.tasks:
-			f(sessions)
+		case op := <-d.ops:
+			op(sessions)
 		}
 	}
 }
 
 // index shows active connections to proxy.
 func (d debugApp) index(w http.ResponseWriter, r *http.Request) {
-	type addr struct {
+	type session struct {
 		Addr, Referrer, UserAgent string
 	}
 
-	addrs, list := make(chan []addr), []addr{}
-	d.tasks <- func(m clientConns) {
+	sessions := make(chan []session)
+
+	// get sessions from main "loop"
+	d.ops <- func(m clientConns) {
+		var list []session
 		for k, c := range m {
-			list = append(list, addr{Addr: k, Referrer: c.Referer(), UserAgent: c.UserAgent()})
+			list = append(list, session{Addr: k, Referrer: c.Referer(), UserAgent: c.UserAgent()})
 		}
-		addrs <- list
+		sessions <- list
 	}
 
-	var data struct {
+	// fetch and render result
+	tmpl := struct {
 		Len  int
-		List []addr
-	}
+		List []session
+	}{List: <-sessions}
 
-	data.List = <-addrs
-	data.Len = len(data.List)
-
-	if err := indexTmpl.Execute(w, data); err != nil {
+	tmpl.Len = len(tmpl.List)
+	if err := indexTmpl.Execute(w, tmpl); err != nil {
 		log.Print(err)
 	}
 }
@@ -137,22 +139,20 @@ var indexTmpl = template.Must(template.New("index").Parse(`<html><head>
 func (d debugApp) trace(w http.ResponseWriter, r *http.Request) {
 	addr := r.FormValue("addr")
 
+	// check if requested session exists
 	connected := make(chan bool)
-	d.tasks <- func(m clientConns) {
+	d.ops <- func(m clientConns) {
 		_, ok := m[addr]
 		connected <- ok
 	}
 
-	var data struct {
+	tmpl := struct {
 		Server    string
 		Addr      string
 		Connected bool
-	}
+	}{Connected: <-connected, Addr: addr}
 
-	data.Addr = addr
-	data.Connected = <-connected
-
-	if err := traceTmpl.Execute(w, data); err != nil {
+	if err := traceTmpl.Execute(w, tmpl); err != nil {
 		log.Print(err)
 	}
 }
