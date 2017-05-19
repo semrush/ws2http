@@ -102,6 +102,15 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		hf.Tracef("type=request ip=%s data=%s custom_header=%+v", ws.Request().RemoteAddr, msg, headers)
 		debug.events <- debugMessage{msgType: wsRequest, req: ws.Request(), data: msg}
 
+		// TODO(sergeyfast): deprecated, remove before merging into master, check \n problem?
+		if bytes.HasPrefix(msg, []byte("AUTH ")) {
+			if hf.isAllowedHeader("Authorization") {
+				headers.Set("Authorization", string(msg[5:]))
+			}
+
+			continue
+		}
+
 		// set custom headers for session
 		if bytes.HasPrefix(msg, []byte("SET ")) {
 			hv := strings.Split(string(msg[4:]), " ")
