@@ -159,24 +159,58 @@ func (d debugApp) trace(w http.ResponseWriter, r *http.Request) {
 
 var traceTmpl = template.Must(template.New("trace").Parse(`<html><head>
 <title>/debug/conns/trace</title>
+<script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+<link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/default.min.css">
+<style>
+	pre.hljs.json {
+		max-height: 70px;
+		overflow: hidden;
+	}
+
+	pre.hljs.json:focus {
+		max-height: 100%;
+		overflow: auto;
+	}
+</style>
 </head>
 <body>
 <p><a href="/debug/conns/">back to list</a></p>
 <strong>Addr: {{.Addr}}</strong>
 {{if .Connected}}
 <script>
-	var w = new WebSocket("ws://" + document.location.host + "/debug/conns/ws?addr={{.Addr}}"); w.onmessage = function(data) {
-	    var tr = document.createElement("tr");
-	    tr.innerHTML = "<td>" + data.timeStamp + "</td>";
-	    var td = document.createElement("td");
-	    td.innerText = data.data;
-	    tr.appendChild(td);
+	hljs.initHighlightingOnLoad();
 
+	var tabindex = 1;
+
+	// it's a PoC. Completely rewrite it.
+	var w = new WebSocket("ws://" + document.location.host + "/debug/conns/ws?addr={{.Addr}}"); w.onmessage = function(data) {
+	    var res = JSON.parse(data.data),
+	    	isRequest = res.method  !== undefined,
+	    	reqId = 'req_' + res.id,
+	    	respId = 'resp_' + res.id,
+	    	id = isRequest ? reqId : respId,
+	    	relId = !isRequest ? reqId : respId;
+
+	    tabindex ++;
+
+	    // response line
+	    var tr = document.createElement("tr");
+	    tr.id = id;
+	    tr.innerHTML = "<td valign='top'>" + data.timeStamp + "<br/><a href='#"+relId+"'>" + ( isRequest ? res.method : 'to ' + reqId ) +  "</a></td>";
+
+	    var td = document.createElement("td"),
+	    	pre = document.createElement("pre");
+
+	    pre.tabIndex = tabindex;
+	    pre.innerText = JSON.stringify(res, undefined, 4);
+		hljs.highlightBlock(pre);
+		td.appendChild(pre);
+	    tr.appendChild(td);
 		document.getElementById("output").appendChild(tr);
 	};
 </script>
 
-<table><tbody id="output"></tbody></table>
+<table border="1" style="border-width: 1px;"><tbody id="output"></tbody></table>
 {{else}}
 client disconnected
 {{end}}
