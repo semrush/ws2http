@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/websocket"
 	"strconv"
+	"sync"
 )
 
 const (
@@ -89,6 +90,7 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		client             = &http.Client{Timeout: time.Duration(hf.timeout) * time.Second, Transport: hf.transport}
 		maxParallelRequest = make(chan struct{}, hf.maxParallelRequests)
 		headers            = http.Header{}
+		headersLock        sync.RWMutex
 	)
 
 	for {
@@ -105,7 +107,9 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		// TODO(sergeyfast): deprecated, remove before merging into master, check \n problem?
 		if bytes.HasPrefix(msg, []byte("AUTH ")) {
 			if hf.isAllowedHeader("Authorization") {
+				headersLock.Lock()
 				headers.Set("Authorization", string(msg[5:]))
+				headersLock.Unlock()
 			}
 
 			continue
@@ -115,7 +119,9 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		if bytes.HasPrefix(msg, []byte("SET ")) {
 			hv := strings.Split(string(msg[4:]), " ")
 			if hf.isAllowedHeader(hv[0]) {
-				headers.Set(hv[0], hv[1]) // TODO(sergeyfast): possible race condition while doPostRequest
+				headersLock.Lock()
+				headers.Set(hv[0], hv[1])
+				headersLock.Unlock()
 			} else {
 				hf.Printf("failed to add custom header=%v value=%v ip=%s", hv[0], hv[1], ws.Request().RemoteAddr)
 			}
@@ -127,6 +133,14 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		go func(msg []byte) {
 			var resp []byte
 			now := time.Now()
+
+			// copy headers
+			headersLock.RLock()
+			locHeaders := make(http.Header)
+			copyHeader(locHeaders, headers)
+			headersLock.RUnlock()
+
+			// do post request
 			rc, err, rpcErr := hf.doPostRequest(client, msg, headers)
 			duration := time.Since(now)
 			<-maxParallelRequest
@@ -213,4 +227,12 @@ func (hf *HttpForwarder) doPostRequest(client *http.Client, postData []byte, hea
 	rc = resp.Body
 
 	return
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
 }
