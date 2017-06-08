@@ -34,11 +34,18 @@ Features
  
  * Proxies all data from WS to HTTP endpoint
  * Timeout for http requests (default 20)
- * Concurrent http requests (default 10)
+ * Concurrent http requests to host by session (default 10)
  * Trace logs (requests/responses)
- * Encapsulated http backend errors to JSON-RPC errors.
+ * Encapsulated http backend errors to JSON-RPC errors (returns -1 * httpStatusCode as error code)
  * Supports multiple endpoints
  * Supports /metrics endpoint as Prometheus handler
+ 
+### Goals
+
+ * [ ] shared ws endpoint with internal routing with prefix for methods
+ * [ ] better interface for /debug/conns
+ * [ ] support batch requests for metrics
+ * [ ] rewrite HttpForwarder.Handler into smaller parts
 
 
 How to run

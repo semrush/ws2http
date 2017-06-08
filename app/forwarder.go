@@ -7,12 +7,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/websocket"
 	"strconv"
+	"sync"
 )
 
 const (
@@ -28,8 +28,6 @@ type HttpForwarder struct {
 	srcUrl, dstUrl               string
 	allowedHeaders               []string
 	timeout, maxParallelRequests int
-	customHeaders                map[string]string
-	lockH                        sync.RWMutex // guards customHeaders
 	transport                    *http.Transport
 
 	logger
@@ -44,7 +42,6 @@ func NewHttpForwarder(dstUrl string, allowedHeaders []string, timeout, maxParall
 	return &HttpForwarder{
 		dstUrl:              dstUrl,
 		allowedHeaders:      allowedHeaders,
-		customHeaders:       make(map[string]string),
 		timeout:             timeout,
 		maxParallelRequests: maxParallelRequests,
 		transport: &http.Transport{
@@ -74,13 +71,6 @@ func (hf *HttpForwarder) isAllowedHeader(header string) bool {
 	return false
 }
 
-// addCustomHeader adds header+value to customHeaders map with lock.
-func (hf *HttpForwarder) addCustomHeader(header, value string) {
-	hf.lockH.Lock()
-	defer hf.lockH.Unlock()
-	hf.customHeaders[header] = value
-}
-
 // Handler is a handler function for handling connection from WS.
 func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 	// count active conns
@@ -90,11 +80,17 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		defer hf.statActiveConns.WithLabelValues(hf.srcUrl).Dec()
 	}
 
+	// debug events
+	debug.events <- debugMessage{msgType: clientConnected, req: ws.Request()}
+	defer func() { debug.events <- debugMessage{msgType: clientDisconnected, req: ws.Request()} }()
+
 	var (
 		err                error
 		msg                []byte
 		client             = &http.Client{Timeout: time.Duration(hf.timeout) * time.Second, Transport: hf.transport}
 		maxParallelRequest = make(chan struct{}, hf.maxParallelRequests)
+		headers            = http.Header{}
+		headersLock        sync.RWMutex
 	)
 
 	for {
@@ -105,13 +101,27 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 			break
 		}
 
-		hf.Tracef("type=request ip=%s data=%s custom_header=%+v", ws.Request().RemoteAddr, msg, hf.customHeaders)
+		hf.Tracef("type=request ip=%s data=%s custom_header=%+v", ws.Request().RemoteAddr, msg, headers)
+		debug.events <- debugMessage{msgType: wsRequest, req: ws.Request(), data: msg}
+
+		// TODO(sergeyfast): deprecated, remove before merging into master, check \n problem?
+		if bytes.HasPrefix(msg, []byte("AUTH ")) {
+			if hf.isAllowedHeader("Authorization") {
+				headersLock.Lock()
+				headers.Set("Authorization", string(msg[5:]))
+				headersLock.Unlock()
+			}
+
+			continue
+		}
 
 		// set custom headers for session
 		if bytes.HasPrefix(msg, []byte("SET ")) {
 			hv := strings.Split(string(msg[4:]), " ")
 			if hf.isAllowedHeader(hv[0]) {
-				hf.addCustomHeader(hv[0], hv[1])
+				headersLock.Lock()
+				headers.Set(hv[0], hv[1])
+				headersLock.Unlock()
 			} else {
 				hf.Printf("failed to add custom header=%v value=%v ip=%s", hv[0], hv[1], ws.Request().RemoteAddr)
 			}
@@ -123,7 +133,15 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 		go func(msg []byte) {
 			var resp []byte
 			now := time.Now()
-			rc, err, rpcErr := hf.doHttpRequest(client, msg)
+
+			// copy headers
+			headersLock.RLock()
+			locHeaders := make(http.Header)
+			copyHeader(locHeaders, headers)
+			headersLock.RUnlock()
+
+			// do post request
+			rc, err, rpcErr := hf.doPostRequest(client, msg, headers)
 			duration := time.Since(now)
 			<-maxParallelRequest
 
@@ -149,6 +167,7 @@ func (hf *HttpForwarder) Handler(ws *websocket.Conn) {
 			}
 
 			hf.Tracef("type=response ip=%s duration=%s data=%s", ws.Request().RemoteAddr, duration, resp)
+			debug.events <- debugMessage{msgType: httpResponse, req: ws.Request(), data: resp}
 			if err = websocket.Message.Send(ws, string(resp)); err != nil {
 				hf.Errorf("can't send data to client=%s err=%s", ws.RemoteAddr().String(), err)
 			}
@@ -179,8 +198,8 @@ func (hf *HttpForwarder) statRequest(method string, duration time.Duration, err 
 	hf.statBackendDurations.WithLabelValues(hf.srcUrl, method, httpCode).Observe(duration.Seconds())
 }
 
-// doHttpRequest sends http request to json-rpc 2.0 endpoint.
-func (hf *HttpForwarder) doHttpRequest(client *http.Client, postData []byte) (rc io.ReadCloser, err error, rpcErr *JsonRpcErrResponse) {
+// doPostRequest sends http post request to json-rpc 2.0 endpoint.
+func (hf *HttpForwarder) doPostRequest(client *http.Client, postData []byte, headers http.Header) (rc io.ReadCloser, err error, rpcErr *JsonRpcErrResponse) {
 	var httpCode int
 	req, err := http.NewRequest("POST", hf.dstUrl, bytes.NewBuffer(postData))
 	defer func() {
@@ -197,14 +216,7 @@ func (hf *HttpForwarder) doHttpRequest(client *http.Client, postData []byte) (rc
 		return
 	}
 
-	if len(hf.customHeaders) > 0 {
-		hf.lockH.RLock()
-		for h, v := range hf.customHeaders {
-			req.Header.Add(h, v)
-		}
-		hf.lockH.RUnlock()
-	}
-
+	req.Header = headers
 	resp, err := client.Do(req)
 	if err != nil {
 		hf.Errorf("client.Do() request failed url=%s err=%s data=%s", hf.dstUrl, err, postData)
@@ -215,4 +227,12 @@ func (hf *HttpForwarder) doHttpRequest(client *http.Client, postData []byte) (rc
 	rc = resp.Body
 
 	return
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
 }
