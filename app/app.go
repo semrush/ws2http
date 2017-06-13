@@ -37,19 +37,34 @@ func (a *App) Run() error {
 
 	a.registerMetrics()
 
+	// set redirect rules, handle specific endpoint
 	for _, r := range a.RedirectRules {
-		a.Printf("adding rule from=ws://%s%s to=%s, allowed_headers=%s timeout=%ds parallel_requests=%d", a.ListenAddr, r.Src, r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
-
-		hf := NewHttpForwarder(r.DstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
-		hf.SetLoggers(a.warn, a.log, a.trace)
-		hf.SetLogLevel(a.logLevel)
-		hf.SetStats(a.statBackendRequests, a.statBackendDurations, a.statActiveConns)
-
+		hf := a.newHttpForwarder(r.Src, r.DstUrl)
 		http.Handle(r.Src, websocket.Handler(hf.Handler))
 	}
 
+	// handle all src:dstUrl endpoint in one / handler
+	ghf := a.newHttpForwarder("/", "*", a.RedirectRules...)
+	http.Handle("/", websocket.Handler(ghf.Handler))
+
+	// start server
 	a.Printf("starting http listener at http://%s\n", a.ListenAddr)
 	return http.ListenAndServe(a.ListenAddr, nil)
+}
+
+func (a *App) newHttpForwarder(src, dstUrl string, rule ...ProxyRule) *HttpForwarder {
+	a.Printf("adding rule from=ws://%s%s to=%s, allowed_headers=%s timeout=%ds parallel_requests=%d", a.ListenAddr, src, dstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
+
+	hf := NewHttpForwarder(dstUrl, a.Headers, a.Timeout, a.MaxParallelRequests)
+	hf.SetLoggers(a.warn, a.log, a.trace)
+	hf.SetLogLevel(a.logLevel)
+	hf.SetStats(a.statBackendRequests, a.statBackendDurations, a.statActiveConns)
+
+	if len(rule) > 0 {
+		hf.SetMultiMode(rule)
+	}
+
+	return hf
 }
 
 // registerMetrics is a function that initializes a.stat* variables and adds /metrics endpoint to echo.

@@ -39,13 +39,15 @@ Features
  * Encapsulated http backend errors to JSON-RPC errors (returns -1 * httpStatusCode as error code)
  * Supports multiple endpoints
  * Supports /metrics endpoint as Prometheus handler
+ * Supports /debug/conns endpoint as remote connection tracer
  
 ### Goals
 
- * [ ] shared ws endpoint with internal routing with prefix for methods
+ * [x] shared ws endpoint with internal routing with prefix for methods
  * [ ] better interface for /debug/conns
- * [ ] support batch requests for metrics
+ * [ ] support batch requests for metrics and routing
  * [ ] rewrite HttpForwarder.Handler into smaller parts
+ * [ ] expand batch requests
 
 
 How to run
