@@ -367,6 +367,8 @@ func (hf *HttpForwarder) doPostRequest(client *http.Client, postData []byte, dst
 	}
 
 	req.Header = headers
+	req.Header.Add("Content-Type", "application/json")
+
 	resp, err := client.Do(req)
 	if err != nil {
 		hf.Errorf("client.Do() request failed url=%s err=%s data=%s", dstUrl, err, postData)
